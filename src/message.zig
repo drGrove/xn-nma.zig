@@ -5,9 +5,21 @@ const testing = std.testing;
 const ChannelId = @import("./channel.zig").ChannelId;
 const Hash = std.crypto.hash.Gimli;
 
+/// All ȱ packets are the same size
+///
+/// This number is based on max UDP over IPv4 packet size:
+/// - IPv4 mandates a path MTU of at least 576 bytes
+/// - IPv4 header is at maximum 60 bytes
+/// - UDP header is 8 bytes
+/// => 576 - 60 - 8 = 504
+const packet_size = 504;
+
+/// Hash size is selected to be as small as possible while cryptographically collision resistant
 const message_hash_length = 16;
+
 const message_id_hash_length = 6;
 const message_id_length = 6;
+const nonce_length = 16;
 
 const MessageId = extern struct {
     id: [message_id_length]u8,
@@ -33,8 +45,8 @@ pub const Envelope = extern struct {
     };
     workaround: Workaround,
     first_in_reply_to: [message_hash_length]u8,
-    in_reply_to_and_payload: [504 - message_id_hash_length - 1 - message_hash_length - 16 - Ed25519.signature_length]u8,
-    nonce: [16]u8,
+    in_reply_to_and_payload: [packet_size - message_id_hash_length - 1 - message_hash_length - nonce_length - Ed25519.signature_length]u8,
+    nonce: [nonce_length]u8,
     signature: [Ed25519.signature_length]u8,
 
     const Self = @This();
@@ -74,7 +86,7 @@ pub const Envelope = extern struct {
     }
 
     fn sign(self: *Self, key: Ed25519.KeyPair) !void {
-        var noise: [32]u8 = undefined;
+        var noise: [Ed25519.noise_length]u8 = undefined;
         std.crypto.random.bytes(&noise);
         self.signature = try Ed25519.sign(
             std.mem.asBytes(self)[0 .. @sizeOf(Envelope) - Ed25519.signature_length],
@@ -83,7 +95,7 @@ pub const Envelope = extern struct {
         );
     }
 
-    fn verify(self: Self, pubkey: [32]u8) !void {
+    fn verify(self: Self, pubkey: [Ed25519.public_length]u8) !void {
         try Ed25519.verify(
             self.signature,
             std.mem.asBytes(&self)[0 .. @sizeOf(Envelope) - Ed25519.signature_length],
@@ -129,8 +141,10 @@ pub const Message = packed struct {
 };
 
 comptime {
-    assert(@sizeOf(Envelope) == 504 - 6);
-    assert(@sizeOf(Message) == 504);
+    assert(@sizeOf(MessageId) == 6);
+    assert(@sizeOf(InReplyTo) == 22);
+    assert(@sizeOf(Envelope) == packet_size - message_id_hash_length);
+    assert(@sizeOf(Message) == packet_size);
 }
 // pub const Payload = struct {
 //     chatstate: ChatState = null,
