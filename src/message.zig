@@ -14,6 +14,8 @@ const Hash = std.crypto.hash.Gimli;
 /// => 576 - 60 - 8 = 504
 const packet_size = 504;
 
+const authentication_tag_length = 16;
+
 const MessageId = extern struct {
     pub const len = 6;
 
@@ -56,8 +58,6 @@ const MessageHash = extern struct {
     }
 };
 
-const nonce_length = 16;
-
 pub const InReplyTo = extern struct {
     id: MessageId,
     hash: MessageHash,
@@ -72,16 +72,12 @@ pub const Envelope = extern struct {
         n_in_reply_to: u4,
     },
     first_in_reply_to: MessageHash,
-    in_reply_to_and_payload: [packet_size - MessageIdHash.len - 1 - MessageHash.len - nonce_length - Ed25519.signature_length]u8,
-    nonce: [nonce_length]u8,
+    in_reply_to_and_payload: [packet_size - MessageIdHash.len - authentication_tag_length - 1 - MessageHash.len - Ed25519.signature_length]u8,
     signature: [Ed25519.signature_length]u8,
 
     const Self = @This();
 
     pub fn init(inReplyToHash: MessageHash) Self {
-        var nonce: [16]u8 = undefined;
-        std.crypto.random.bytes(&nonce);
-
         return Self{
             .workaround = .{
                 .continuation = false,
@@ -89,7 +85,6 @@ pub const Envelope = extern struct {
             },
             .first_in_reply_to = inReplyToHash,
             .in_reply_to_and_payload = undefined,
-            .nonce = nonce,
             .signature = undefined,
         };
     }
@@ -176,16 +171,20 @@ test "Envelope with 2 parents" {
     try e.verify(key_pair.public_key);
 }
 
+const EncryptedEnvelope = [@sizeOf(Envelope)]u8;
+
 pub const Message = packed struct {
     id_hash: MessageIdHash,
-    envelope: Envelope,
+    encrypted: EncryptedEnvelope,
+    authentication_tag: [authentication_tag_length]u8,
 
     const Self = @This();
 
     pub fn init(channel_id: ChannelId, message_id: MessageId, envelope: Envelope) Self {
-        return Self{
+        var r = Self{
             .id_hash = MessageIdHash.calculate(channel_id, message_id),
-            .envelope = envelope,
+            .encrypted = undefined,
+            .authentication_tag = undefined,
         };
     }
 
@@ -197,7 +196,7 @@ pub const Message = packed struct {
 comptime {
     assert(@sizeOf(MessageId) == 6);
     assert(@sizeOf(InReplyTo) == 22);
-    assert(@sizeOf(Envelope) == packet_size - MessageIdHash.len);
+    assert(@sizeOf(Envelope) == packet_size - MessageIdHash.len - authentication_tag_length);
     assert(@sizeOf(Message) == packet_size);
 }
 // pub const Payload = struct {
