@@ -31,19 +31,19 @@ const MessageId = extern struct {
     }
 };
 
-pub const InReplyTo = packed struct {
+pub const InReplyTo = extern struct {
     id: MessageId,
     hash: [message_hash_length]u8,
 };
 
 pub const Envelope = extern struct {
-    const Workaround = packed struct {
+    /// Workaround Zig packed struct bugs
+    workaround: packed struct {
         continuation: bool,
         padding: u3 = 0,
         /// This is offset by 1 as a message can never have 0 in_reply_tos
         n_in_reply_to: u4,
-    };
-    workaround: Workaround,
+    },
     first_in_reply_to: [message_hash_length]u8,
     in_reply_to_and_payload: [packet_size - message_id_hash_length - 1 - message_hash_length - nonce_length - Ed25519.signature_length]u8,
     nonce: [nonce_length]u8,
@@ -68,10 +68,8 @@ pub const Envelope = extern struct {
     }
 
     fn getInReplyToSlice(self: *Self) []InReplyTo {
-        // 22 is @sizeOf(InReplyTo) but for some reason is not working...
-        //const slice = self.in_reply_to_and_payload[0 .. @as(u9, self.workaround.n_in_reply_to) * 22];
-        //return std.mem.bytesAsSlice(InReplyTo, slice);
-        return @ptrCast([*]InReplyTo, &self.in_reply_to_and_payload)[0..self.workaround.n_in_reply_to];
+        const slice = self.in_reply_to_and_payload[0 .. @as(u9, self.workaround.n_in_reply_to) * @sizeOf(InReplyTo)];
+        return std.mem.bytesAsSlice(InReplyTo, slice);
     }
 
     pub fn addInReplyTo(self: *Self, inReplyTo: InReplyTo) void {
@@ -81,8 +79,7 @@ pub const Envelope = extern struct {
     }
 
     pub fn getPayloadSlice(self: *Self) []u8 {
-        // 22 is @sizeOf(InReplyTo) but for some reason is not working...
-        return self.in_reply_to_and_payload[@as(u9, self.workaround.n_in_reply_to) * 22 ..];
+        return self.in_reply_to_and_payload[@as(u9, self.workaround.n_in_reply_to) * @sizeOf(InReplyTo) ..];
     }
 
     fn sign(self: *Self, key: Ed25519.KeyPair) !void {
