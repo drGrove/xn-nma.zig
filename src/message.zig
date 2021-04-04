@@ -30,12 +30,14 @@ const MessageId = extern struct {
 
 const MessageIdHash = extern struct {
     pub const len = 6;
+    pub const magic_string = "ȱ id hash";
 
     hash: [len]u8,
 
     pub fn calculate(channel_id: ChannelId, message_id: MessageId) MessageIdHash {
         var self: MessageIdHash = undefined;
         var hash = Hash.init(.{});
+        hash.update(magic_string);
         hash.update(&channel_id.id);
         hash.update(&message_id.id);
         hash.final(&self.hash);
@@ -47,11 +49,14 @@ const MessageHash = extern struct {
     /// Hash size is selected to be as small as possible while cryptographically collision resistant
     pub const len = 16;
 
+    pub const magic_string = "ȱ message hash";
+
     hash: [len]u8,
 
     pub fn calculate(message: Message) MessageHash {
         var self: MessageHash = undefined;
         var hash = Hash.init(.{});
+        hash.update(magic_string);
         hash.update(std.mem.asBytes(&message));
         hash.final(&self.hash);
         return self;
