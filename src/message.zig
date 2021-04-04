@@ -33,9 +33,9 @@ pub const Envelope = extern struct {
     };
     workaround: Workaround,
     first_in_reply_to: [message_hash_length]u8,
-    in_reply_to_and_payload: [504 - message_id_hash_length - 1 - message_hash_length - 16 - 64]u8,
+    in_reply_to_and_payload: [504 - message_id_hash_length - 1 - message_hash_length - 16 - Ed25519.signature_length]u8,
     nonce: [16]u8,
-    signature: [64]u8,
+    signature: [Ed25519.signature_length]u8,
 
     const Self = @This();
 
@@ -76,11 +76,19 @@ pub const Envelope = extern struct {
     fn sign(self: *Self, key: Ed25519.KeyPair) !void {
         var noise: [32]u8 = undefined;
         std.crypto.random.bytes(&noise);
-        self.signature = try Ed25519.sign(std.mem.asBytes(self)[0 .. @sizeOf(Envelope) - 64], key, noise);
+        self.signature = try Ed25519.sign(
+            std.mem.asBytes(self)[0 .. @sizeOf(Envelope) - Ed25519.signature_length],
+            key,
+            noise,
+        );
     }
 
     fn verify(self: Self, pubkey: [32]u8) !void {
-        try Ed25519.verify(self.signature, std.mem.asBytes(&self)[0 .. @sizeOf(Envelope) - 64], pubkey);
+        try Ed25519.verify(
+            self.signature,
+            std.mem.asBytes(&self)[0 .. @sizeOf(Envelope) - Ed25519.signature_length],
+            pubkey,
+        );
     }
 };
 
