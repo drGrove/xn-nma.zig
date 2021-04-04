@@ -101,7 +101,28 @@ pub const Envelope = extern struct {
     }
 };
 
-test "Envelope" {
+test "Envelope with 1 parent" {
+    const first_in_reply_to = "abcdef1234567890".*;
+    const key_pair = try Ed25519.KeyPair.create(null);
+    const payload = [_]u8{0} ** 401;
+
+    // construct message
+    var e = Envelope.init(first_in_reply_to);
+    std.mem.copy(u8, e.getPayloadSlice(), &payload);
+    try e.sign(key_pair);
+
+    // verify construction is as intended
+    testing.expectEqual(first_in_reply_to, e.first_in_reply_to);
+    testing.expectEqualSlices(
+        InReplyTo,
+        &[_]InReplyTo{},
+        e.getInReplyToSlice(),
+    );
+    testing.expectEqualSlices(u8, &payload, e.getPayloadSlice());
+    try e.verify(key_pair.public_key);
+}
+
+test "Envelope with 2 parents" {
     const first_in_reply_to = "abcdef1234567890".*;
     const id = MessageId.initInt(1); // https://github.com/ziglang/zig/issues/8435
     const second_in_reply_to = InReplyTo{
@@ -109,7 +130,7 @@ test "Envelope" {
         .hash = "abcdef1234567891".*,
     };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{0} ** 379;
+    const payload = [_]u8{'@'} ** 379;
 
     // construct message
     var e = Envelope.init(first_in_reply_to);
