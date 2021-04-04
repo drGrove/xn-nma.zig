@@ -30,6 +30,15 @@ const MessageIdHash = extern struct {
     pub const len = 6;
 
     hash: [len]u8,
+
+    pub fn calculate(channel_id: ChannelId, message_id: MessageId) MessageIdHash {
+        var self: MessageIdHash = undefined;
+        var hash = Hash.init(.{});
+        hash.update(&channel_id.id);
+        hash.update(&message_id.id);
+        hash.final(&self.hash);
+        return self;
+    }
 };
 
 const MessageHash = extern struct {
@@ -37,6 +46,14 @@ const MessageHash = extern struct {
     pub const len = 16;
 
     hash: [len]u8,
+
+    pub fn calculate(message: Message) MessageHash {
+        var self: MessageHash = undefined;
+        var hash = Hash.init(.{});
+        hash.update(std.mem.asBytes(&message));
+        hash.final(&self.hash);
+        return self;
+    }
 };
 
 const nonce_length = 16;
@@ -166,18 +183,14 @@ pub const Message = packed struct {
     const Self = @This();
 
     pub fn init(channel_id: ChannelId, message_id: MessageId, envelope: Envelope) Self {
-        var hash = Hash.init(.{});
-        hash.update(channel_id);
         return Self{
-            .id_hash = undefined,
+            .id_hash = MessageIdHash.calculate(channel_id, message_id),
             .envelope = envelope,
         };
     }
 
     pub fn hash(self: Self) MessageHash {
-        var output: [32]u8 = undefined;
-        // TODO: take the hash of the data (envelope) + id
-        return output;
+        return MessageHash.calculate(self);
     }
 };
 
