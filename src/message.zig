@@ -86,8 +86,9 @@ pub const Envelope = extern struct {
 
 test "envelope" {
     var e = Envelope.init("abcdef1234567890".*);
+    const id = MessageId.initInt(1); // https://github.com/ziglang/zig/issues/8435
     e.addInReplyTo(.{
-        .id = MessageId.initInt(1),
+        .id = id,
         .hash = "abcdef1234567891".*,
     });
     const payloadSlice = e.getPayloadSlice();
