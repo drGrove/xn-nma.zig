@@ -183,12 +183,15 @@ test "Envelope with 2 parents" {
 
 const EncryptedEnvelope = [@sizeOf(Envelope)]u8;
 
-pub const Message = packed struct {
+pub const Message = extern struct {
+    pub const magic_string = "ȱ message";
+
     id_hash: MessageIdHash,
     encrypted: EncryptedEnvelope,
     authentication_tag: [authentication_tag_length]u8,
 
     const Self = @This();
+    const GimliAead = std.crypto.aead.Gimli;
 
     pub fn init(channel_id: ChannelId, message_id: MessageId, envelope: Envelope) Self {
         var r = Self{
@@ -196,12 +199,69 @@ pub const Message = packed struct {
             .encrypted = undefined,
             .authentication_tag = undefined,
         };
+
+        var npub = [_]u8{0} ** GimliAead.nonce_length;
+        std.mem.copy(u8, &npub, &message_id.id);
+
+        var k = [_]u8{0} ** GimliAead.key_length;
+        std.mem.copy(u8, &k, &channel_id.id);
+
+        GimliAead.encrypt(&r.encrypted, &r.authentication_tag, std.mem.asBytes(&envelope), magic_string, npub, k);
+
+        return r;
     }
 
     pub fn hash(self: Self) MessageHash {
         return MessageHash.calculate(self);
     }
+
+    pub fn decrypt(self: Self, channel_id: ChannelId, message_id: MessageId) !Envelope {
+        var npub = [_]u8{0} ** GimliAead.nonce_length;
+        std.mem.copy(u8, &npub, &message_id.id);
+
+        var k = [_]u8{0} ** GimliAead.key_length;
+        std.mem.copy(u8, &k, &channel_id.id);
+
+        var r: Envelope = undefined;
+        try GimliAead.decrypt(std.mem.asBytes(&r), &self.encrypted, self.authentication_tag, magic_string, npub, k);
+        return r;
+    }
 };
+
+test "Message" {
+    const channel_id = ChannelId{ .id = [_]u8{1} ** ChannelId.len };
+    const message_id = MessageId.initInt(1);
+    const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
+    const key_pair = try Ed25519.KeyPair.create(null);
+    const payload = [_]u8{0} ** 401;
+
+    // construct message
+    const m = blk: {
+        var e = Envelope.init(first_in_reply_to);
+        std.mem.copy(u8, e.getPayloadSlice(), &payload);
+        try e.sign(key_pair);
+        break :blk Message.init(channel_id, message_id, e);
+    };
+
+    { // verify construction is as intended
+        testing.expectEqual(MessageIdHash.calculate(channel_id, message_id), m.id_hash);
+        var e2 = try m.decrypt(channel_id, message_id);
+        testing.expectEqual(first_in_reply_to, e2.first_in_reply_to);
+        testing.expectEqualSlices(
+            InReplyTo,
+            &[_]InReplyTo{},
+            e2.getInReplyToSlice(),
+        );
+        testing.expectEqualSlices(u8, &payload, e2.getPayloadSlice());
+        try e2.verify(key_pair.public_key);
+    }
+
+    { // check invalid construction fails
+        const wrong_message_id = message_id.next();
+        testing.expect(!std.meta.eql(MessageIdHash.calculate(channel_id, wrong_message_id), m.id_hash));
+        testing.expectError(error.AuthenticationFailed, m.decrypt(channel_id, wrong_message_id));
+    }
+}
 
 comptime {
     assert(@sizeOf(MessageId) == 6);
