@@ -101,17 +101,30 @@ pub const Envelope = extern struct {
     }
 };
 
-test "envelope" {
-    var e = Envelope.init("abcdef1234567890".*);
+test "Envelope" {
+    const first_in_reply_to = "abcdef1234567890".*;
     const id = MessageId.initInt(1); // https://github.com/ziglang/zig/issues/8435
-    e.addInReplyTo(.{
+    const second_in_reply_to = InReplyTo{
         .id = id,
         .hash = "abcdef1234567891".*,
-    });
-    const payloadSlice = e.getPayloadSlice();
-    std.mem.set(u8, payloadSlice, 0);
+    };
     const key_pair = try Ed25519.KeyPair.create(null);
+    const payload = [_]u8{0} ** 379;
+
+    // construct message
+    var e = Envelope.init(first_in_reply_to);
+    e.addInReplyTo(second_in_reply_to);
+    std.mem.copy(u8, e.getPayloadSlice(), &payload);
     try e.sign(key_pair);
+
+    // verify construction is as intended
+    testing.expectEqual(first_in_reply_to, e.first_in_reply_to);
+    testing.expectEqualSlices(
+        InReplyTo,
+        &[_]InReplyTo{second_in_reply_to},
+        e.getInReplyToSlice(),
+    );
+    testing.expectEqualSlices(u8, &payload, e.getPayloadSlice());
     try e.verify(key_pair.public_key);
 }
 
