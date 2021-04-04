@@ -26,6 +26,11 @@ const MessageId = extern struct {
         std.mem.writeIntBig(u48, &self.id, n);
         return self;
     }
+
+    pub fn next(self: MessageId) MessageId {
+        const n = std.mem.readIntBig(u48, &self.id);
+        return initInt(n + 1);
+    }
 };
 
 const MessageIdHash = extern struct {
