@@ -14,15 +14,10 @@ const Hash = std.crypto.hash.Gimli;
 /// => 576 - 60 - 8 = 504
 const packet_size = 504;
 
-/// Hash size is selected to be as small as possible while cryptographically collision resistant
-const message_hash_length = 16;
-
-const message_id_hash_length = 6;
-const message_id_length = 6;
-const nonce_length = 16;
-
 const MessageId = extern struct {
-    id: [message_id_length]u8,
+    pub const len = 6;
+
+    id: [len]u8,
 
     pub fn initInt(n: u48) MessageId {
         var self: MessageId = undefined;
@@ -31,9 +26,24 @@ const MessageId = extern struct {
     }
 };
 
+const MessageIdHash = extern struct {
+    pub const len = 6;
+
+    hash: [len]u8,
+};
+
+const MessageHash = extern struct {
+    /// Hash size is selected to be as small as possible while cryptographically collision resistant
+    pub const len = 16;
+
+    hash: [len]u8,
+};
+
+const nonce_length = 16;
+
 pub const InReplyTo = extern struct {
     id: MessageId,
-    hash: [message_hash_length]u8,
+    hash: MessageHash,
 };
 
 pub const Envelope = extern struct {
@@ -44,14 +54,14 @@ pub const Envelope = extern struct {
         /// This is offset by 1 as a message can never have 0 in_reply_tos
         n_in_reply_to: u4,
     },
-    first_in_reply_to: [message_hash_length]u8,
-    in_reply_to_and_payload: [packet_size - message_id_hash_length - 1 - message_hash_length - nonce_length - Ed25519.signature_length]u8,
+    first_in_reply_to: MessageHash,
+    in_reply_to_and_payload: [packet_size - MessageIdHash.len - 1 - MessageHash.len - nonce_length - Ed25519.signature_length]u8,
     nonce: [nonce_length]u8,
     signature: [Ed25519.signature_length]u8,
 
     const Self = @This();
 
-    pub fn init(inReplyToHash: [message_hash_length]u8) Self {
+    pub fn init(inReplyToHash: MessageHash) Self {
         var nonce: [16]u8 = undefined;
         std.crypto.random.bytes(&nonce);
 
@@ -102,7 +112,7 @@ pub const Envelope = extern struct {
 };
 
 test "Envelope with 1 parent" {
-    const first_in_reply_to = "abcdef1234567890".*;
+    const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
     const key_pair = try Ed25519.KeyPair.create(null);
     const payload = [_]u8{0} ** 401;
 
@@ -123,11 +133,11 @@ test "Envelope with 1 parent" {
 }
 
 test "Envelope with 2 parents" {
-    const first_in_reply_to = "abcdef1234567890".*;
+    const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
     const id = MessageId.initInt(1); // https://github.com/ziglang/zig/issues/8435
     const second_in_reply_to = InReplyTo{
         .id = id,
-        .hash = "abcdef1234567891".*,
+        .hash = MessageHash{ .hash = "abcdef1234567891".* },
     };
     const key_pair = try Ed25519.KeyPair.create(null);
     const payload = [_]u8{'@'} ** 379;
@@ -150,7 +160,7 @@ test "Envelope with 2 parents" {
 }
 
 pub const Message = packed struct {
-    id_hash: [message_id_hash_length]u8,
+    id_hash: MessageIdHash,
     envelope: Envelope,
 
     const Self = @This();
@@ -164,7 +174,7 @@ pub const Message = packed struct {
         };
     }
 
-    pub fn hash(self: Self) [16]u8 {
+    pub fn hash(self: Self) MessageHash {
         var output: [32]u8 = undefined;
         // TODO: take the hash of the data (envelope) + id
         return output;
@@ -174,7 +184,7 @@ pub const Message = packed struct {
 comptime {
     assert(@sizeOf(MessageId) == 6);
     assert(@sizeOf(InReplyTo) == 22);
-    assert(@sizeOf(Envelope) == packet_size - message_id_hash_length);
+    assert(@sizeOf(Envelope) == packet_size - MessageIdHash.len);
     assert(@sizeOf(Message) == packet_size);
 }
 // pub const Payload = struct {

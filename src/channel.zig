@@ -3,7 +3,9 @@ const assert = std.debug.assert;
 const testing = std.testing;
 
 pub const ChannelId = struct {
-    id: [16]u8,
+    pub const len = 16;
+
+    id: [len]u8,
 };
 
 pub const Channel = struct {
