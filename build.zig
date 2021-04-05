@@ -1,7 +1,11 @@
-const Builder = @import("std").build.Builder;
+const std = @import("std");
 
-pub fn build(b: *Builder) void {
-    const main = b.addTest("./src/main.zig");
-    main.setBuildMode(b.standardReleaseOptions());
-    main.addIncludeDir("./src");
+pub fn build(b: *std.build.Builder) void {
+    const mode = b.standardReleaseOptions();
+
+    var main_tests = b.addTest("src/main.zig");
+    main_tests.setBuildMode(mode);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&main_tests.step);
 }
