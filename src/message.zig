@@ -16,7 +16,7 @@ const packet_size = 504;
 
 const authentication_tag_length = 16;
 
-const MessageId = extern struct {
+pub const MessageId = extern struct {
     pub const len = 6;
 
     id: [len]u8,
@@ -33,7 +33,7 @@ const MessageId = extern struct {
     }
 };
 
-const MessageIdHash = extern struct {
+pub const MessageIdHash = extern struct {
     pub const len = 6;
     pub const magic_string = "ȱ id hash";
 
@@ -48,9 +48,13 @@ const MessageIdHash = extern struct {
         hash.final(&self.hash);
         return self;
     }
+
+    pub fn asInteger(self: MessageIdHash) u48 {
+        return std.mem.readIntBig(u48, &self.hash);
+    }
 };
 
-const MessageHash = extern struct {
+pub const MessageHash = extern struct {
     /// Hash size is selected to be as small as possible while cryptographically collision resistant
     pub const len = 16;
 

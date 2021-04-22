@@ -1,0 +1,3 @@
+[submodule "vendor/zig-sqlite"]
+	path = vendor/zig-sqlite
+	url = https://github.com/vrischmann/zig-sqlite
