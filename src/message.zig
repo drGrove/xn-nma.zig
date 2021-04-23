@@ -118,7 +118,7 @@ pub const Envelope = extern struct {
         return self.in_reply_to_and_payload[@as(u9, self.workaround.n_in_reply_to) * @sizeOf(InReplyTo) ..];
     }
 
-    fn sign(self: *Self, key: Ed25519.KeyPair) !void {
+    pub fn sign(self: *Self, key: Ed25519.KeyPair) !void {
         var noise: [Ed25519.noise_length]u8 = undefined;
         std.crypto.random.bytes(&noise);
         self.signature = try Ed25519.sign(
@@ -128,7 +128,7 @@ pub const Envelope = extern struct {
         );
     }
 
-    fn verify(self: Self, pubkey: [Ed25519.public_length]u8) !void {
+    pub fn verify(self: Self, pubkey: [Ed25519.public_length]u8) !void {
         try Ed25519.verify(
             self.signature,
             std.mem.asBytes(&self)[0 .. @sizeOf(Envelope) - Ed25519.signature_length],

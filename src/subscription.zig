@@ -4,6 +4,7 @@ const BloomFilter = @import("./bloom_filter.zig").BloomFilter;
 const assert = std.debug.assert;
 const testing = std.testing;
 
+usingnamespace @import("./channel.zig");
 usingnamespace @import("./message.zig");
 
 fn hash(out: []u8, Ki: usize, in: []const u8) void {
@@ -38,6 +39,84 @@ const MessageStore = struct {
     // }
 };
 
+const sqlite_helpers = struct {
+    // https://github.com/ziglang/zig/issues/8595
+    const SQLITE_TRANSIENT = @intToPtr(sqlite.c.sqlite3_destructor_type, @bitCast(usize, @as(isize, -1)));
+
+    pub fn fromBlob(comptime T: type, value: ?*sqlite.c.sqlite3_value) !*const T {
+        if (comptime std.meta.containerLayout(T) == .Auto) {
+            @compileError("must be extern or packed struct to have defined layout");
+        }
+
+        const len = sqlite.c.sqlite3_value_bytes(value);
+        if (len != @sizeOf(T)) return error.SQLiteConstraintFunction;
+
+        const ptr = @ptrCast([*]const u8, sqlite.c.sqlite3_value_blob(value));
+        return std.mem.bytesAsValue(T, ptr[0..@sizeOf(T)]);
+    }
+
+    const Determinism = enum(c_int) { NonDeterministic = 0, Deterministic = sqlite.c.SQLITE_DETERMINISTIC };
+
+    pub fn createFunction(db: sqlite.Db, func_name: [*:0]const u8, comptime func: anytype, det: Determinism) !void {
+        const func_info = @typeInfo(@TypeOf(func)).Fn;
+        assert(func_info.is_generic == false);
+        assert(func_info.is_var_args == false);
+        const ArgTuple = std.meta.ArgsTuple(@TypeOf(func));
+
+        const result = sqlite.c.sqlite3_create_function(
+            db.db,
+            func_name,
+            func_info.args.len,
+            sqlite.c.SQLITE_UTF8 | @enumToInt(det),
+            null,
+            struct {
+                fn xFunc(context: ?*sqlite.c.sqlite3_context, argc: c_int, argv: ?[*]?*sqlite.c.sqlite3_value) callconv(.C) void {
+                    assert(argc == func_info.args.len);
+                    const sqlite_args = argv.?[0..func_info.args.len];
+
+                    var func_args: ArgTuple = undefined;
+                    inline for (func_info.args) |arg, i| {
+                        const arg_type = arg.arg_type.?;
+                        func_args[i] = switch (@typeInfo(arg_type)) {
+                            .Struct => (sqlite_helpers.fromBlob(arg_type, sqlite_args[i]) catch |e| {
+                                sqlite.c.sqlite3_result_error(context, "invalid argument", switch (e) {
+                                    error.SQLiteConstraintFunction => sqlite.c.SQLITE_CONSTRAINT_FUNCTION,
+                                });
+                                return;
+                            }).*,
+                            else => @compileError("unhandled auto coercion"),
+                        };
+                    }
+
+                    const result = @call(.{}, func, func_args);
+
+                    switch (@typeInfo(@TypeOf(result))) {
+                        .Int => |intInfo| {
+                            if ((intInfo.bits + if (intInfo.signedness == .unsigned) 1 else 0) <= 32) {
+                                sqlite.c.sqlite3_result_int(context, result);
+                            } else if ((intInfo.bits + if (intInfo.signedness == .unsigned) 1 else 0) <= 64) {
+                                sqlite.c.sqlite3_result_int64(context, result);
+                            } else {
+                                @compileError("integer not always representable");
+                            }
+                        },
+                        .Struct => {
+                            // TODO: check result type has no pointer fields
+                            sqlite.c.sqlite3_result_blob(context, &result, @sizeOf(@TypeOf(result)), sqlite_helpers.SQLITE_TRANSIENT);
+                        },
+                        else => @compileError("unhandled auto coercion"),
+                    }
+                }
+            }.xFunc,
+            null,
+            null,
+        );
+        if (result != sqlite.c.SQLITE_OK) {
+            return sqlite.errorFromResultCode(result);
+        }
+    }
+};
+
 test "sqlite" {
     var db: sqlite.Db = undefined;
     try db.init(.{
@@ -48,91 +127,111 @@ test "sqlite" {
         .threading_mode = .MultiThread,
     });
 
-    {
-        // Takes a Message (as a BLOB) and returns the message id hash (as an integer)
-        const result = sqlite.c.sqlite3_create_function(
-            db.db,
-            "Message.id_hash",
-            1,
-            sqlite.c.SQLITE_UTF8 | sqlite.c.SQLITE_DETERMINISTIC,
-            null,
-            struct {
-                fn xFunc(context: ?*sqlite.c.sqlite3_context, argc: c_int, argv: ?[*]?*sqlite.c.sqlite3_value) callconv(.C) void {
-                    assert(argc == 1);
-                    const arg = argv.?[0];
-
-                    const message_len = sqlite.c.sqlite3_value_bytes(arg);
-                    if (message_len != @sizeOf(Message)) {
-                        sqlite.c.sqlite3_result_error(context, "incorrect Message size", sqlite.c.SQLITE_CONSTRAINT_FUNCTION);
-                        return;
-                    }
-                    const message_ptr = @ptrCast([*]const u8, sqlite.c.sqlite3_value_blob(arg));
-                    const message = std.mem.bytesToValue(Message, message_ptr[0..@sizeOf(Message)]);
-
-                    sqlite.c.sqlite3_result_int64(context, message.id_hash.asInteger());
-                }
-            }.xFunc,
-            null,
-            null,
-        );
-        if (result != sqlite.c.SQLITE_OK) {
-            return sqlite.errorFromResultCode(result);
+    // Takes a Message (as a BLOB) and returns the message id hash (as an integer)
+    try sqlite_helpers.createFunction(db, "ȱ.Message.id_hash", struct {
+        fn Message_id_hash(message: Message) u48 {
+            return message.id_hash.asInteger();
         }
-    }
+    }.Message_id_hash, .Deterministic);
 
-    {
-        const result = sqlite.c.sqlite3_create_function(
-            db.db,
-            "MessageHash.calculate",
-            1,
-            sqlite.c.SQLITE_UTF8 | sqlite.c.SQLITE_DETERMINISTIC,
-            null,
-            struct {
-                fn xFunc(context: ?*sqlite.c.sqlite3_context, argc: c_int, argv: ?[*]?*sqlite.c.sqlite3_value) callconv(.C) void {
-                    assert(argc == 1);
-                    const arg = argv.?[0];
+    try sqlite_helpers.createFunction(db, "ȱ.Message.hash", Message.hash, .Deterministic);
 
-                    const message_len = sqlite.c.sqlite3_value_bytes(arg);
-                    if (message_len != @sizeOf(Message)) {
-                        sqlite.c.sqlite3_result_error(context, "incorrect Message size", sqlite.c.SQLITE_CONSTRAINT_FUNCTION);
-                        return;
-                    }
-                    const message_ptr = @ptrCast([*]const u8, sqlite.c.sqlite3_value_blob(arg));
-                    const message = std.mem.bytesToValue(Message, message_ptr[0..@sizeOf(Message)]);
-
-                    const msg_hash = MessageHash.calculate(message);
-
-                    // https://github.com/ziglang/zig/issues/8595
-                    const SQLITE_TRANSIENT = @intToPtr(sqlite.c.sqlite3_destructor_type, @bitCast(usize, @as(isize, -1)));
-                    sqlite.c.sqlite3_result_blob(context, &msg_hash.hash, MessageHash.len, SQLITE_TRANSIENT);
-                }
-            }.xFunc,
-            null,
-            null,
-        );
-        if (result != sqlite.c.SQLITE_OK) {
-            return sqlite.errorFromResultCode(result);
+    try sqlite_helpers.createFunction(db, "ȱ.MessageIdHash.calculate", struct {
+        fn MessageIdHash_calculate(channel_id: ChannelId, message_id: MessageId) u48 {
+            return MessageIdHash.calculate(channel_id, message_id).asInteger();
         }
-    }
+    }.MessageIdHash_calculate, .Deterministic);
+
+    try db.exec(
+        \\ PRAGMA foreign_keys = ON;
+    , .{});
 
     try db.exec(
         \\ create table packets(
-        \\    message blob not null check(length(message) == 504),
-        \\    id_hash integer not null generated always as ("Message.id_hash"(message)) stored,
-        \\    hash blob not null unique generated always as ("MessageHash.calculate"(message))
+        \\   message blob not null check(length(message) == 504),
+        \\   id_hash integer not null generated always as ("ȱ.Message.id_hash"(message)) stored,
+        \\   hash blob not null generated always as ("ȱ.Message.hash"(message))
         \\ );
     , .{});
+
+    // `packets(hash)` itself is unique, but we include `id_hash` to allow the foreign key constraint below.
     try db.exec(
-        \\ insert into packets(message) values(?);
-    , .{
-        "b" ** 504,
-    });
-    const result = try db.one(
-        struct { hash: [16]u8 },
-        \\ select hash from packets;
-    ,
-        .{},
-        .{},
-    );
-    std.debug.print("{}\n", .{result});
+        \\ create unique index packets_hashes on packets(hash, id_hash);
+    , .{});
+
+    try db.exec(
+        \\ create table known_messages(
+        \\   channel_id blob not null,
+        \\   message_id blob not null,
+        \\   message_id_hash integer not null generated always as ("ȱ.MessageIdHash.calculate"(channel_id, message_id)),
+        \\   message_hash blob,
+        \\   foreign key(message_hash, message_id_hash) references packets(hash, id_hash)
+        \\ );
+    , .{});
+
+    {
+        const channel_id = ChannelId{ .id = [_]u8{1} ** ChannelId.len };
+        const message_id = MessageId.initInt(1);
+
+        // construct message
+        const m = blk: {
+            const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
+            const key_pair = try std.crypto.sign.Ed25519.KeyPair.create(null);
+            const payload = [_]u8{0} ** 401;
+
+            var e = Envelope.init(first_in_reply_to);
+            std.mem.copy(u8, e.getPayloadSlice(), &payload);
+            try e.sign(key_pair);
+            break :blk Message.init(channel_id, message_id, e);
+        };
+
+        // XXX: if I don't store this in a temporary I get a segfault at runtime
+        const tmp = sqlite.Blob{ .data = std.mem.asBytes(&m) };
+        try db.exec(
+            \\ insert into packets(message) values(?);
+        , .{
+            tmp,
+        });
+
+        std.debug.print("{}\n", .{
+            try db.one(
+                MessageHash,
+                \\ select hash from packets;
+            ,
+                .{},
+                .{},
+            ),
+        });
+        std.debug.print("LOCAL:{} SQLITE:{}\n", .{
+            m.id_hash.asInteger(),
+            try db.one(
+                struct { id_hash: u48 },
+                \\ select id_hash from packets;
+            ,
+                .{},
+                .{},
+            ),
+        });
+
+        const a1 = sqlite.Blob{ .data = std.mem.asBytes(&channel_id) };
+        const a2 = sqlite.Blob{ .data = std.mem.asBytes(&message_id) };
+        const a3 = sqlite.Blob{ .data = std.mem.asBytes(&m.hash()) };
+        try db.exec(
+        // \\ insert into known_messages(channel_id, message_id, message_hash) values('1234567890abcdef','12345678','foo');
+            \\ insert into known_messages(channel_id, message_id, message_hash) values(?, ?, ?);
+        , .{
+            a1, a2, a3,
+        });
+
+        std.debug.print("LOCAL:{} SQLITE:{}\n", .{
+            m.id_hash.asInteger(),
+            try db.one(
+                struct { id_hash: u48 },
+                \\ select message_id_hash from known_messages;
+            ,
+                .{},
+                .{},
+            ),
+        });
+    }
 }
