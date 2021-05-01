@@ -27,8 +27,12 @@ pub const MessageId = extern struct {
         return self;
     }
 
+    pub fn asInt(self: MessageId) u48 {
+        return std.mem.readIntBig(u48, &self.id);
+    }
+
     pub fn next(self: MessageId) MessageId {
-        const n = std.mem.readIntBig(u48, &self.id);
+        const n = self.asInt();
         return initInt(n + 1);
     }
 };
