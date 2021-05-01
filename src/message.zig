@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const Ed25519 = std.crypto.sign.Ed25519;
 const testing = std.testing;
 const ChannelId = @import("./channel.zig").ChannelId;
+const varint = @import("./varint.zig");
 const Hash = std.crypto.hash.Gimli;
 
 /// All ȱ packets are the same size
@@ -87,25 +88,26 @@ pub const Envelope = extern struct {
     /// Workaround Zig packed struct bugs
     workaround: packed struct {
         continuation: bool,
-        padding: u3 = 0,
-        /// This is offset by 1 as a message can never have 0 in_reply_tos
-        n_in_reply_to: u4,
+        padding: u6 = 0,
+        n_in_reply_to_bytes: u9,
     },
     authorization: IntraChannelReference,
     first_in_reply_to: MessageHash,
-    in_reply_to_and_payload: [packet_size -
+    in_reply_to_and_payload: [varying_space]u8,
+    signature: [Ed25519.signature_length]u8,
+
+    const varying_space = packet_size -
         // outside of envelope
         (MessageIdHash.len + authentication_tag_length) -
 
-        // info byte
-        1 -
+        // info bytes
+        2 -
         // authorization
         @sizeOf(IntraChannelReference) -
         // first_in_reply_to
         MessageHash.len -
         // signature
-        Ed25519.signature_length]u8,
-    signature: [Ed25519.signature_length]u8,
+        Ed25519.signature_length;
 
     const Self = @This();
 
@@ -113,7 +115,7 @@ pub const Envelope = extern struct {
         return Self{
             .workaround = .{
                 .continuation = false,
-                .n_in_reply_to = 0,
+                .n_in_reply_to_bytes = 0,
             },
             .authorization = authorization,
             .first_in_reply_to = inReplyToHash,
@@ -122,19 +124,87 @@ pub const Envelope = extern struct {
         };
     }
 
-    fn getInReplyToSlice(self: *Self) []InReplyTo {
-        const slice = self.in_reply_to_and_payload[0 .. @as(u9, self.workaround.n_in_reply_to) * @sizeOf(InReplyTo)];
-        return std.mem.bytesAsSlice(InReplyTo, slice);
+    pub const InReplyToIterator = struct {
+        fbs: std.io.FixedBufferStream([]u8),
+        message_id: u48,
+
+        pub fn current(it: InReplyToIterator) !IntraChannelReference {
+            var fbs_copy = it.fbs;
+            const reader = fbs_copy.reader();
+            const n = try varint.read(u48, reader);
+            return .{
+                .id = MessageId.initInt(try std.math.sub(u48, it.message_id, n)),
+                .hash = reader.readStruct(MessageHash) catch unreachable,
+            };
+        }
+
+        pub fn next(it: *InReplyToIterator) !?IntraChannelReference {
+            const old_pos = it.fbs.pos;
+            errdefer it.fbs.pos = old_pos;
+
+            const reader = it.fbs.reader();
+            const n = varint.read(u48, reader) catch |err| switch (err) {
+                error.EndOfStream => return null,
+                else => return err,
+            };
+            it.message_id = try std.math.sub(u48, it.message_id, n);
+            return IntraChannelReference{
+                .id = MessageId.initInt(it.message_id),
+                .hash = reader.readStruct(MessageHash) catch unreachable,
+            };
+        }
+    };
+
+    pub fn iterateReplyTo(self: *Self, message_id: MessageId) InReplyToIterator {
+        return .{
+            .fbs = .{
+                .buffer = self.in_reply_to_and_payload[0..self.workaround.n_in_reply_to_bytes],
+                .pos = 0,
+            },
+            .message_id = message_id.asInt() - 1,
+        };
     }
 
-    pub fn addInReplyTo(self: *Self, inReplyTo: IntraChannelReference) void {
-        self.workaround.n_in_reply_to += 1;
-        const slice = self.getInReplyToSlice();
-        slice[self.workaround.n_in_reply_to - 1] = inReplyTo;
+    pub fn addInReplyTo(self: *Self, message_id: MessageId, inReplyTo: IntraChannelReference) error{NoSpace}!void {
+        assert(inReplyTo.id.asInt() < message_id.asInt());
+
+        var it = self.iterateReplyTo(message_id);
+
+        // find location in sorted list
+        // `it` will be at the first occurance that needs to be bumped down (or at the end of the list)
+        var previous_message_id: u48 = message_id.asInt() - 1; // first in-reply-to
+        var moved_varint_size_diff: usize = 0;
+        while (it.next() catch unreachable) |_| { // will break loop if new location is at end
+            if (it.message_id < inReplyTo.id.asInt()) {
+                // found place in middle to insert, calculate how much varints change in size
+                const previous_varint_size = varint.size(previous_message_id - it.message_id);
+                const moved_varint_size = varint.size(inReplyTo.id.asInt() - it.message_id);
+                moved_varint_size_diff = previous_varint_size - moved_varint_size;
+
+                break;
+            }
+            previous_message_id = it.message_id;
+        }
+
+        // we need to bump any elements after the selected location down
+        const new_varint_size = varint.size(previous_message_id - inReplyTo.id.asInt());
+        const diff = new_varint_size + MessageHash.len - moved_varint_size_diff;
+
+        const old_slice = it.fbs.buffer[it.fbs.pos..];
+        const new_n_in_reply_to_bytes = @as(usize, self.workaround.n_in_reply_to_bytes) + diff;
+        if (new_n_in_reply_to_bytes > varying_space) return error.NoSpace;
+        // no modification performed before this point
+        self.workaround.n_in_reply_to_bytes = @intCast(u9, new_n_in_reply_to_bytes); // takes space from payload
+        it.fbs.buffer = self.in_reply_to_and_payload[0..self.workaround.n_in_reply_to_bytes];
+        const new_slice = it.fbs.buffer[it.fbs.pos + diff ..];
+        std.mem.copyBackwards(u8, new_slice, old_slice);
+
+        varint.write(it.fbs.writer(), previous_message_id - inReplyTo.id.asInt()) catch unreachable;
+        it.fbs.writer().writeStruct(inReplyTo.hash) catch unreachable;
     }
 
     pub fn getPayloadSlice(self: *Self) []u8 {
-        return self.in_reply_to_and_payload[@as(u9, self.workaround.n_in_reply_to) * @sizeOf(InReplyTo) ..];
+        return self.in_reply_to_and_payload[self.workaround.n_in_reply_to_bytes..];
     }
 
     pub fn sign(self: *Self, key: Ed25519.KeyPair) !void {
@@ -159,7 +229,7 @@ pub const Envelope = extern struct {
 test "Envelope with 1 parent" {
     const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{0} ** 379;
+    const payload = [_]u8{0} ** 378;
 
     // construct message
     var e = Envelope.init(undefined, first_in_reply_to);
@@ -168,38 +238,39 @@ test "Envelope with 1 parent" {
 
     // verify construction is as intended
     testing.expectEqual(first_in_reply_to, e.first_in_reply_to);
-    testing.expectEqualSlices(
-        InReplyTo,
-        &[_]InReplyTo{},
-        e.getInReplyToSlice(),
-    );
+    {
+        var it = e.iterateReplyTo(MessageId.initInt(1));
+        testing.expectEqual(@as(?IntraChannelReference, null), try it.next());
+    }
     testing.expectEqualSlices(u8, &payload, e.getPayloadSlice());
     try e.verify(key_pair.public_key);
 }
 
 test "Envelope with 2 parents" {
+    const id = MessageId.initInt(3); // https://github.com/ziglang/zig/issues/8435
+
     const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
-    const id = MessageId.initInt(1); // https://github.com/ziglang/zig/issues/8435
+    const id_2ir = MessageId.initInt(1); // https://github.com/ziglang/zig/issues/8435
     const second_in_reply_to = InReplyTo{
-        .id = id,
+        .id = id_2ir,
         .hash = MessageHash{ .hash = "abcdef1234567891".* },
     };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{'@'} ** 357;
+    const payload = [_]u8{'@'} ** 361;
 
     // construct message
     var e = Envelope.init(undefined, first_in_reply_to);
-    e.addInReplyTo(second_in_reply_to);
+    try e.addInReplyTo(id, second_in_reply_to);
     std.mem.copy(u8, e.getPayloadSlice(), &payload);
     try e.sign(key_pair);
 
     // verify construction is as intended
     testing.expectEqual(first_in_reply_to, e.first_in_reply_to);
-    testing.expectEqualSlices(
-        InReplyTo,
-        &[_]InReplyTo{second_in_reply_to},
-        e.getInReplyToSlice(),
-    );
+    {
+        var it = e.iterateReplyTo(id);
+        testing.expectEqual(second_in_reply_to, (try it.next()).?);
+        testing.expectEqual(@as(?IntraChannelReference, null), try it.next());
+    }
     testing.expectEqualSlices(u8, &payload, e.getPayloadSlice());
     try e.verify(key_pair.public_key);
 }
@@ -256,7 +327,7 @@ test "Message" {
     const message_id = MessageId.initInt(1);
     const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{0} ** 379;
+    const payload = [_]u8{0} ** 378;
 
     // construct message
     const m = blk: {
@@ -270,11 +341,10 @@ test "Message" {
         testing.expectEqual(MessageIdHash.calculate(channel_id, message_id), m.id_hash);
         var e2 = try m.decrypt(channel_id, message_id);
         testing.expectEqual(first_in_reply_to, e2.first_in_reply_to);
-        testing.expectEqualSlices(
-            InReplyTo,
-            &[_]InReplyTo{},
-            e2.getInReplyToSlice(),
-        );
+        {
+            var it = e2.iterateReplyTo(MessageId.initInt(1));
+            testing.expectEqual(@as(?IntraChannelReference, null), try it.next());
+        }
         testing.expectEqualSlices(u8, &payload, e2.getPayloadSlice());
         try e2.verify(key_pair.public_key);
     }
