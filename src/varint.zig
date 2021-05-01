@@ -134,3 +134,25 @@ test "write" {
         std.testing.expectEqualSlices(u8, "\xff\xff\x7f", fbs.getWritten());
     }
 }
+
+pub fn size(uint_value: anytype) usize {
+    var used: usize = 1;
+    var value = uint_value;
+    while (true) {
+        value >>= 7;
+        if (value == 0) break;
+        value -= 1;
+        used += 1;
+    }
+    return used;
+}
+
+test "size" {
+    std.testing.expectEqual(@as(usize, 1), size(@as(u8, 0x7f)));
+    std.testing.expectEqual(@as(usize, 2), size(@as(u8, 0x80)));
+    std.testing.expectEqual(@as(usize, 2), size(@as(u8, 0xff)));
+    std.testing.expectEqual(@as(usize, 2), size(@as(u9, 0x17f)));
+    std.testing.expectEqual(@as(usize, 2), size(@as(u15, 16511)));
+    std.testing.expectEqual(@as(usize, 3), size(@as(u15, 16512)));
+    std.testing.expectEqual(@as(usize, 3), size(@as(u22, 2113663)));
+}
