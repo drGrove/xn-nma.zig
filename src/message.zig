@@ -72,10 +72,12 @@ pub const MessageHash = extern struct {
     }
 };
 
-pub const InReplyTo = extern struct {
+const IntraChannelReference = extern struct {
     id: MessageId,
     hash: MessageHash,
 };
+
+const InReplyTo = IntraChannelReference;
 
 pub const Envelope = extern struct {
     /// Workaround Zig packed struct bugs
@@ -85,18 +87,31 @@ pub const Envelope = extern struct {
         /// This is offset by 1 as a message can never have 0 in_reply_tos
         n_in_reply_to: u4,
     },
+    authorization: IntraChannelReference,
     first_in_reply_to: MessageHash,
-    in_reply_to_and_payload: [packet_size - MessageIdHash.len - authentication_tag_length - 1 - MessageHash.len - Ed25519.signature_length]u8,
+    in_reply_to_and_payload: [packet_size -
+        // outside of envelope
+        (MessageIdHash.len + authentication_tag_length) -
+
+        // info byte
+        1 -
+        // authorization
+        @sizeOf(IntraChannelReference) -
+        // first_in_reply_to
+        MessageHash.len -
+        // signature
+        Ed25519.signature_length]u8,
     signature: [Ed25519.signature_length]u8,
 
     const Self = @This();
 
-    pub fn init(inReplyToHash: MessageHash) Self {
+    pub fn init(authorization: IntraChannelReference, inReplyToHash: MessageHash) Self {
         return Self{
             .workaround = .{
                 .continuation = false,
                 .n_in_reply_to = 0,
             },
+            .authorization = authorization,
             .first_in_reply_to = inReplyToHash,
             .in_reply_to_and_payload = undefined,
             .signature = undefined,
@@ -108,7 +123,7 @@ pub const Envelope = extern struct {
         return std.mem.bytesAsSlice(InReplyTo, slice);
     }
 
-    pub fn addInReplyTo(self: *Self, inReplyTo: InReplyTo) void {
+    pub fn addInReplyTo(self: *Self, inReplyTo: IntraChannelReference) void {
         self.workaround.n_in_reply_to += 1;
         const slice = self.getInReplyToSlice();
         slice[self.workaround.n_in_reply_to - 1] = inReplyTo;
@@ -140,10 +155,10 @@ pub const Envelope = extern struct {
 test "Envelope with 1 parent" {
     const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{0} ** 401;
+    const payload = [_]u8{0} ** 379;
 
     // construct message
-    var e = Envelope.init(first_in_reply_to);
+    var e = Envelope.init(undefined, first_in_reply_to);
     std.mem.copy(u8, e.getPayloadSlice(), &payload);
     try e.sign(key_pair);
 
@@ -166,10 +181,10 @@ test "Envelope with 2 parents" {
         .hash = MessageHash{ .hash = "abcdef1234567891".* },
     };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{'@'} ** 379;
+    const payload = [_]u8{'@'} ** 357;
 
     // construct message
-    var e = Envelope.init(first_in_reply_to);
+    var e = Envelope.init(undefined, first_in_reply_to);
     e.addInReplyTo(second_in_reply_to);
     std.mem.copy(u8, e.getPayloadSlice(), &payload);
     try e.sign(key_pair);
@@ -237,11 +252,11 @@ test "Message" {
     const message_id = MessageId.initInt(1);
     const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
     const key_pair = try Ed25519.KeyPair.create(null);
-    const payload = [_]u8{0} ** 401;
+    const payload = [_]u8{0} ** 379;
 
     // construct message
     const m = blk: {
-        var e = Envelope.init(first_in_reply_to);
+        var e = Envelope.init(undefined, first_in_reply_to);
         std.mem.copy(u8, e.getPayloadSlice(), &payload);
         try e.sign(key_pair);
         break :blk Message.init(channel_id, message_id, e);
@@ -269,6 +284,7 @@ test "Message" {
 
 comptime {
     assert(@sizeOf(MessageId) == 6);
+    assert(@sizeOf(IntraChannelReference) == 22);
     assert(@sizeOf(InReplyTo) == 22);
     assert(@sizeOf(Envelope) == packet_size - MessageIdHash.len - authentication_tag_length);
     assert(@sizeOf(Message) == packet_size);

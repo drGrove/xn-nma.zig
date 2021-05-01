@@ -205,9 +205,9 @@ test "sqlite" {
         const m = blk: {
             const first_in_reply_to = MessageHash{ .hash = "abcdef1234567890".* };
             const key_pair = try std.crypto.sign.Ed25519.KeyPair.create(null);
-            const payload = [_]u8{0} ** 401;
+            const payload = [_]u8{0} ** 379;
 
-            var e = Envelope.init(first_in_reply_to);
+            var e = Envelope.init(undefined, first_in_reply_to);
             std.mem.copy(u8, e.getPayloadSlice(), &payload);
             try e.sign(key_pair);
             break :blk Message.init(channel_id, message_id, e);
