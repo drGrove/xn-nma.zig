@@ -143,31 +143,59 @@ test "sqlite" {
     }.MessageIdHash_calculate, .Deterministic);
 
     try db.exec(
-        \\ PRAGMA foreign_keys = ON;
+        \\PRAGMA foreign_keys = ON;
     , .{});
 
     try db.exec(
-        \\ create table packets(
-        \\   message blob not null check(length(message) == 504),
-        \\   id_hash integer not null generated always as ("ȱ.Message.id_hash"(message)) stored,
-        \\   hash blob not null generated always as ("ȱ.Message.hash"(message))
-        \\ );
-    , .{});
-
-    // `packets(hash)` itself is unique, but we include `id_hash` to allow the foreign key constraint below.
-    try db.exec(
-        \\ create unique index packets_hashes on packets(hash, id_hash);
+        \\create table message_packet(
+        \\  message blob not null check(length(message) == 504),
+        \\  id_hash integer not null generated always as ("ȱ.Message.id_hash"(message)),
+        \\  hash blob not null generated always as ("ȱ.Message.hash"(message))
+        \\);
     , .{});
 
     try db.exec(
-        \\ create table known_messages(
-        \\   channel_id blob not null,
-        \\   message_id blob not null,
-        \\   message_id_hash integer not null generated always as ("ȱ.MessageIdHash.calculate"(channel_id, message_id)),
-        \\   message_hash blob,
-        \\   foreign key(message_hash, message_id_hash) references packets(hash, id_hash)
-        \\ );
+        \\create unique index message_packet_hashes on message_packet(hash, id_hash);
     , .{});
+
+    try db.exec(
+        \\create table wanted_message(
+        \\  channel_id blob not null check(length(channel_id) == 16),
+        \\  message_id blob not null check(length(message_id) == 6),
+        \\  message_id_hash integer not null generated always as ("ȱ.MessageIdHash.calculate"(channel_id, message_id)),
+        \\  message_hash blob unique not null check(length(message_hash) == 16)
+        \\);
+    , .{});
+
+    try db.exec(
+        \\create table known_message(
+        \\  channel_id blob not null check(length(channel_id) == 16),
+        \\  message_id blob not null check(length(message_id) == 6),
+        \\  message_id_hash integer not null generated always as ("ȱ.MessageIdHash.calculate"(channel_id, message_id)),
+        \\  message_hash blob check(length(message_hash) == 16),
+        \\  verified integer not null check(verified == 0 or verified == 1) default 0 -- has the message hash been verified back to a master-key message
+        \\);
+    , .{});
+
+    try db.exec(
+        \\create unique index known_message_by_channel_and_message on known_message(channel_id, message_id, message_hash);
+    , .{});
+
+    try db.exec(
+        \\create table channel(
+        \\  channel_id blob primary key check(length(channel_id) == 16),
+        \\  want_tail integer check(want_tail == 0 or want_tail == 1) -- do we want to follow this channel
+        \\) without rowid;
+    , .{});
+
+    // try db.exec(
+    //     \\create table channel_participant(
+    //     \\  channel_id blob references channel(channel_id) check(length(channel_id) == 16),
+    //     \\  authorization_message_id blob not null check(length(authorization_message_id) == 6),
+    //     \\  authorization_message_hash blob check(length(authorization_message_hash) == 16),
+    //     \\  foreign key(channel_id, authorization_message_id, authorization_message_hash) references known_message(channel_id, message_id, message_hash)
+    //     \\);
+    // , .{});
 
     {
         const channel_id = ChannelId{ .id = [_]u8{1} ** ChannelId.len };
@@ -188,7 +216,7 @@ test "sqlite" {
         // XXX: if I don't store this in a temporary I get a segfault at runtime
         const tmp = sqlite.Blob{ .data = std.mem.asBytes(&m) };
         try db.exec(
-            \\ insert into packets(message) values(?);
+            \\ insert into message_packet(message) values(?);
         , .{
             tmp,
         });
@@ -196,7 +224,7 @@ test "sqlite" {
         std.debug.print("{}\n", .{
             try db.one(
                 MessageHash,
-                \\ select hash from packets;
+                \\ select hash from message_packet;
             ,
                 .{},
                 .{},
@@ -206,7 +234,7 @@ test "sqlite" {
             m.id_hash.asInteger(),
             try db.one(
                 struct { id_hash: u48 },
-                \\ select id_hash from packets;
+                \\ select id_hash from message_packet;
             ,
                 .{},
                 .{},
@@ -217,8 +245,9 @@ test "sqlite" {
         const a2 = sqlite.Blob{ .data = std.mem.asBytes(&message_id) };
         const a3 = sqlite.Blob{ .data = std.mem.asBytes(&m.hash()) };
         try db.exec(
-        // \\ insert into known_messages(channel_id, message_id, message_hash) values('1234567890abcdef','12345678','foo');
-            \\ insert into known_messages(channel_id, message_id, message_hash) values(?, ?, ?);
+            \\ insert into known_message(channel_id, message_id, message_hash) values
+            //\\   ('0123456789abcdef','123456','abcdef'),
+            \\   (?, ?, ?);
         , .{
             a1, a2, a3,
         });
@@ -227,7 +256,7 @@ test "sqlite" {
             m.id_hash.asInteger(),
             try db.one(
                 struct { id_hash: u48 },
-                \\ select message_id_hash from known_messages;
+                \\ select message_id_hash from known_message;
             ,
                 .{},
                 .{},
