@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Ed25519 = std.crypto.sign.Ed25519;
 const testing = std.testing;
+const json = std.json;
 const ChannelId = @import("./channel.zig").ChannelId;
 const varint = @import("./varint.zig");
 const Hash = std.crypto.hash.Gimli;
@@ -84,11 +85,32 @@ const IntraChannelReference = extern struct {
 
 const InReplyTo = IntraChannelReference;
 
+const PayloadType = enum(u2) {
+    Authorization,
+    EncryptedJSON,
+    EncryptedCBOR,
+};
+
+const AuthorizationType = enum(u2) {
+    PublicKey,
+};
+
+// Probably along the lines of
+// https://en.wikipedia.org/wiki/Object-capability_model?
+// const AuthorizationConstraints =
+
+pub const Authorization = struct {
+    t: AuthorizationType,
+    // Number of messages allowed to be sent with the authorization
+    exp: u4,
+};
+
 pub const Envelope = extern struct {
     /// Workaround Zig packed struct bugs
     workaround: packed struct {
         continuation: bool,
-        padding: u6 = 0,
+        payloadType: PayloadType,
+        padding: u4 = 0,
         n_in_reply_to_bytes: u9,
     },
     authorization: IntraChannelReference,
